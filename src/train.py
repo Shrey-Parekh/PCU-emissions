@@ -25,7 +25,7 @@ try:
         ReplayBuffer, PrioritizedReplayBuffer, EpsilonScheduler, Transition,
         STGATAgent, HistoryBuffer
     )
-    from .config import TrainingConfig, OUTPUTS_DIR, PER_CONFIG, TEMPORAL_CONFIG, MODEL_GAMMA
+    from .config import TrainingConfig, OUTPUTS_DIR, PER_CONFIG, TEMPORAL_CONFIG, MODEL_GAMMA, REWARD_CONFIG
     from .env_sumo import PuneSUMOEnv
 except ImportError:
     from src.agent import (
@@ -33,7 +33,7 @@ except ImportError:
         ReplayBuffer, PrioritizedReplayBuffer, EpsilonScheduler, Transition,
         STGATAgent, HistoryBuffer
     )
-    from src.config import TrainingConfig, OUTPUTS_DIR, PER_CONFIG, TEMPORAL_CONFIG, MODEL_GAMMA
+    from src.config import TrainingConfig, OUTPUTS_DIR, PER_CONFIG, TEMPORAL_CONFIG, MODEL_GAMMA, REWARD_CONFIG
     from src.env_sumo import PuneSUMOEnv
 
 logging.basicConfig(
@@ -418,6 +418,8 @@ def run_episode(
         "avg_queue": float(np.mean(step_queue_pcus)) if step_queue_pcus else 0.0,
         "throughput": info.get("throughput", 0.0),
         "avg_travel_time": info.get("avg_travel_time", 0.0),
+        "episode_co2": info.get("episode_co2", 0.0),
+        "co2_per_veh": info.get("co2_per_veh", 0.0),
         "updates": float(updates),
         "training_updates": float(training_updates),
         "loss": avg_loss,
@@ -445,7 +447,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=TrainingConfig.seed)
     parser.add_argument("--port", type=int, default=None, help="SUMO port for parallel execution")
     parser.add_argument("--seeds", type=str, default=None, help="Comma-separated seeds for multi-seed training (e.g., '1,2,3,4,5')")
-    parser.add_argument("--scenario", type=str, default="uniform", choices=["uniform", "morning_peak", "evening_peak"], help="Traffic scenario")
+    parser.add_argument("--scenario", type=str, default="uniform",
+                        choices=["uniform", "morning_peak", "evening_peak",
+                                 "high_saturation", "bus_heavy", "bus_heavy_saturated"],
+                        help="Traffic scenario")
+    parser.add_argument("--beta", type=float, default=REWARD_CONFIG.get("beta", 0.0),
+                        help="Reward blend: 0=congestion-optimal, 1=emissions-optimal")
+    parser.add_argument("--co2_norm", type=float, default=REWARD_CONFIG.get("co2_norm", 8000.0),
+                        help="CO2 normalization (mg/step/intersection); calibrate via probe_co2.py")
     parser.add_argument("--save_dir", type=str, default=str(OUTPUTS_DIR))
     
     parser.add_argument("--model_type", type=str, choices=["DQN", "GNN-DQN", "GAT-DQN-Base", "GAT-DQN", "ST-GAT"],
@@ -553,6 +562,8 @@ def main() -> None:
         "port": args.port,  # Pass port for parallel execution
         "max_steps": args.max_steps,
         "use_global_reward": use_global,
+        "beta": args.beta,
+        "co2_norm": args.co2_norm,
     })
     
     env.reset()

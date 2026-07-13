@@ -36,6 +36,18 @@ VEHICLE_MIX = {
     "bus_truck": 0.06        # 6%
 }
 
+# SUMO HBEFA4 emission classes per vehicle type.
+# NOTE: HBEFA has no three-wheeler class; auto_rickshaw is proxied by a
+# small motorcycle class and this approximation is disclosed in the paper.
+# HBEFA factors are European fleet data mapped to Indian BS-IV/BS-III;
+# treat as HBEFA-approximated, NOT Indian-calibrated. Requires SUMO >= 1.14.
+VEHICLE_EMISSION_CLASS = {
+    "two_wheeler":   "HBEFA4/MC_4S_le250cc_Euro-4",
+    "auto_rickshaw": "HBEFA4/MC_4S_gt250cc_Euro-4",
+    "car":           "HBEFA4/PC_petrol_Euro-4",
+    "bus_truck":     "HBEFA4/UBus_Std_gt15-18t_Euro-III",
+}
+
 # Legacy format for backward compatibility
 VEHICLE_CLASSES = {
     "TWO_WHEELER": {"service_rate": 3, "pcu": 0.5, "arrival_weight": 0.60, "vtype": "two_wheeler"},
@@ -44,10 +56,29 @@ VEHICLE_CLASSES = {
     "BUS_TRUCK": {"service_rate": 1, "pcu": 3.0, "arrival_weight": 0.06, "vtype": "bus_truck"},
 }
 
+# Scenario definitions. Optional keys (read with .get):
+#   demand_scale: multiplies base injection rate (higher saturation)
+#   mix: per-scenario vehicle-class share override (must sum to 1.0);
+#        falls back to VEHICLE_MIX / arrival_weight when absent.
+# bus_heavy scenarios push bus share to 20% to expose class-differentiated
+# emission conflict (buses dominate idle CO2 but are few in the base mix).
 PEAK_HOUR_CONFIG = {
     "morning_peak": {"steps": (0, 1200), "NS_multiplier": 1.3, "EW_multiplier": 1.0},
     "evening_peak": {"steps": (2400, 3600), "NS_multiplier": 1.0, "EW_multiplier": 1.8},
     "uniform": {"steps": (0, 3600), "NS_multiplier": 1.0, "EW_multiplier": 1.0},
+    "high_saturation": {
+        "steps": (0, 3600), "NS_multiplier": 1.0, "EW_multiplier": 1.0,
+        "demand_scale": 1.6,
+    },
+    "bus_heavy": {
+        "steps": (0, 3600), "NS_multiplier": 1.0, "EW_multiplier": 1.0,
+        "mix": {"two_wheeler": 0.40, "auto_rickshaw": 0.14, "car": 0.26, "bus_truck": 0.20},
+    },
+    "bus_heavy_saturated": {
+        "steps": (0, 3600), "NS_multiplier": 1.0, "EW_multiplier": 1.0,
+        "demand_scale": 1.6,
+        "mix": {"two_wheeler": 0.40, "auto_rickshaw": 0.14, "car": 0.26, "bus_truck": 0.20},
+    },
 }
 
 BASELINE_CONFIG = {
@@ -66,7 +97,8 @@ SUMO_CONFIG = {
     "lane_split_min_queue": 3,
 }
 
-SCENARIOS = ["uniform", "morning_peak", "evening_peak"]
+SCENARIOS = ["uniform", "morning_peak", "evening_peak",
+             "high_saturation", "bus_heavy", "bus_heavy_saturated"]
 PHASE_TYPES = ["NS_GREEN", "ALL_RED_CLEARANCE", "EW_GREEN"]
 STATS_SEEDS = [1, 2, 3, 4, 5]
 OBS_FEATURES_PER_AGENT = 24  # 15 self + 6 neighbor + 1 action_mask + 2 inflow
@@ -139,6 +171,14 @@ EPSILON_CONFIG = {
 REWARD_CONFIG = {
     "reward_queue_norm":  30.0,   # Normalization: 30 PCU → reward = -1.0
     "w_pressure_bonus":   0.2,    # Pressure shaping coefficient
+    # CO2 normalization (mg/step per intersection). PLACEHOLDER — calibrate from
+    # probe_co2.py so the CO2 term sits in roughly [-1, 0] before the loss-time
+    # clamp to [-1, 1] (train.py). A wrong value silently flattens the CO2 signal.
+    "co2_norm":           8000.0,
+    # Blend weight for the multi-objective reward:
+    #   r = -(1-beta)*queue_norm - beta*co2_norm + (1-beta)*pressure_bonus
+    # beta=0 -> congestion-optimal, beta=1 -> emissions-optimal.
+    "beta":               0.0,
 }
 
 MODEL_GAMMA = {

@@ -2,10 +2,10 @@
 <!-- Pune Mixed Traffic Vehicle Type and Route Definitions -->
 <routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">
     <!-- Vehicle Type Definitions for Indian Mixed Traffic -->
-    <vType id="two_wheeler" length="2.0" maxSpeed="13.89" accel="2.5" decel="4.5" sigma="0.6" color="255,165,0" vClass="motorcycle"/>
-    <vType id="auto_rickshaw" length="3.5" maxSpeed="11.11" accel="1.8" decel="3.5" sigma="0.5" color="255,255,0" vClass="taxi"/>
-    <vType id="car" length="4.5" maxSpeed="13.89" accel="2.0" decel="4.0" sigma="0.4" color="0,128,255" vClass="passenger"/>
-    <vType id="bus_truck" length="10.0" maxSpeed="11.11" accel="1.2" decel="3.0" sigma="0.3" color="128,0,128" vClass="truck"/>
+    <vType id="two_wheeler" emissionClass="HBEFA4/MC_4S_le250cc_Euro-4" length="2.0" maxSpeed="13.89" accel="2.5" decel="4.5" sigma="0.6" color="255,165,0" vClass="motorcycle"/>
+    <vType id="auto_rickshaw" emissionClass="HBEFA4/MC_4S_gt250cc_Euro-4" length="3.5" maxSpeed="11.11" accel="1.8" decel="3.5" sigma="0.5" color="255,255,0" vClass="taxi"/>
+    <vType id="car" emissionClass="HBEFA4/PC_petrol_Euro-4" length="4.5" maxSpeed="13.89" accel="2.0" decel="4.0" sigma="0.4" color="0,128,255" vClass="passenger"/>
+    <vType id="bus_truck" emissionClass="HBEFA4/UBus_Std_gt15-18t_Euro-III" length="10.0" maxSpeed="11.11" accel="1.2" decel="3.0" sigma="0.3" color="128,0,128" vClass="truck"/>
     
     <!-- Route Definitions for 3x3 Grid - All 12 Directional Paths -->
     

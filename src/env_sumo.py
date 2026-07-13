@@ -33,6 +33,7 @@ from .config import (
     SCENARIOS,
     OBS_FEATURES_PER_AGENT,
     INJECTION_CONFIG,
+    REWARD_CONFIG,
 )
 
 
@@ -101,6 +102,16 @@ class PuneSUMOEnv:
         self.port = config.get("port", None)  # SUMO port for parallel runs
         self.max_steps = config.get("max_steps", 3600)
         self.use_global_reward = config.get("use_global_reward", True)
+
+        # Multi-objective reward parameters. beta blends PCU-queue vs CO2.
+        # co2_norm is calibrated via probe_co2.py; wrong values get flattened
+        # by the loss-time clamp to [-1, 1] in train.py.
+        self.beta = config.get("beta", REWARD_CONFIG.get("beta", 0.0))
+        self.queue_norm = REWARD_CONFIG.get("reward_queue_norm", 30.0)
+        self.co2_norm = config.get("co2_norm", REWARD_CONFIG.get("co2_norm", 8000.0))
+        self.pressure_coef = REWARD_CONFIG.get("w_pressure_bonus", 0.2)
+        # Per-episode CO2 accumulator (mg, network total), reset in reset().
+        self.episode_co2 = 0.0
         
         self.sumo_config_file = SUMO_CONFIG["config_file"]
         self.step_length = SUMO_CONFIG["step_length"]
@@ -386,6 +397,7 @@ class PuneSUMOEnv:
         self.prev_phases = [0] * self.n_intersections
         self.steps_since_switch = [0] * self.n_intersections
         self.turning_counts = {"straight": 0, "right_turn": 0, "left_turn": 0, "u_turn": 0}
+        self.episode_co2 = 0.0
 
         # Initialize metrics tracking
         self.departed_vehicles = set()
@@ -520,17 +532,24 @@ class PuneSUMOEnv:
         # Get multipliers
         ns_mult = self.peak_config["NS_multiplier"]
         ew_mult = self.peak_config["EW_multiplier"]
-        
+
+        # Optional per-scenario overrides (bus_heavy / high_saturation etc.)
+        scenario_mix = self.peak_config.get("mix", None)
+        demand_scale = self.peak_config.get("demand_scale", 1.0)
+
         # Inject vehicles
         for edges, direction in straight_routes:
             mult = ns_mult if direction == "NS" else ew_mult
             
             for vclass_name, vclass_data in VEHICLE_CLASSES.items():
                 vtype = vclass_data["vtype"]
-                weight = vclass_data["arrival_weight"]
-                
-                # Use calibrated base rate from INJECTION_CONFIG
-                base_rate = weight * INJECTION_CONFIG["base_rate"]
+                if scenario_mix is not None:
+                    weight = scenario_mix.get(vtype, vclass_data["arrival_weight"])
+                else:
+                    weight = vclass_data["arrival_weight"]
+
+                # Calibrated base rate, scaled for higher-saturation scenarios
+                base_rate = weight * INJECTION_CONFIG["base_rate"] * demand_scale
                 rate = base_rate * mult
                 num = np.random.poisson(rate)
                 
@@ -586,7 +605,11 @@ class PuneSUMOEnv:
             self.steps_since_switch[i] += 1
         
         self._update_queues()
-        
+
+        # Accumulate network CO2 (mg) over all tracked lanes for this step
+        step_co2 = sum(self._get_intersection_co2(tl_id) for tl_id in self.tl_ids)
+        self.episode_co2 += step_co2
+
         obs = self._get_observation()
         rewards = self._calculate_rewards()
         done = self.current_step >= self.max_steps
@@ -625,44 +648,68 @@ class PuneSUMOEnv:
                         self.steps_since_switch[i] = 0
                         self._set_sumo_phase(tl_id, 1)
     
+    def _get_intersection_co2(self, tl_id: str) -> float:
+        """Sum CO2 emission (mg/step) over an intersection's controlled lanes.
+
+        Uses lane.getCO2Emission, which returns the CO2 emitted on the lane
+        during the last simulation step (mg, since step_length = 1.0 s). Class
+        differentiation comes from each vType's HBEFA4 emissionClass, so this is
+        already class-specific CO2 — no extra per-class weighting is applied
+        (that would double-count the class differences the emission model bakes in).
+        """
+        total_co2 = 0.0
+        if tl_id not in self.queues:
+            return total_co2
+        for lane_id in self.queues[tl_id]:
+            try:
+                total_co2 += self.traci_conn.lane.getCO2Emission(lane_id)
+            except traci.exceptions.TraCIException:
+                pass
+        return total_co2
+
     def _compute_reward(self, intersection_id: int) -> float:
         """
-        PCU-weighted queue minimization with pressure shaping.
+        Multi-objective reward: blends PCU-weighted queue with CO2 emissions.
 
-        Term 1: Queue penalty (primary ~90% of signal)
-          - Directly optimizes evaluation metric (avg queue PCU)
-          - PCU-weighted: bus (3.0) hurts 6x more than two-wheeler (0.5)
-          - Gives VCA a reason to learn class importance
+          r = -(1-beta)*queue_penalty - beta*co2_penalty + (1-beta)*pressure_bonus
 
-        Term 2: Pressure bonus (shaping ~10% of signal)
-          - Small bonus for serving longer queue direction
-          - Speeds up early learning, cannot be gamed
-          - Dominated by queue penalty at all traffic levels
+        beta=0 recovers the original congestion-only reward exactly. beta=1 is a
+        pure emissions objective. Pressure shaping is a congestion heuristic, so
+        it is scaled by (1-beta) to keep the beta=1 endpoint a clean
+        emissions-optimal policy rather than a congestion-biased one.
 
-        No explicit switching/clearance penalty:
-          - During ALL_RED both queues grow → queue penalty increases
-          - This implicitly captures switching cost, scaled by traffic load
+        Both penalties are normalized to roughly [0, 1] so that after the
+        loss-time clamp to [-1, 1] (train.py) neither term is silently flattened.
+        CO2 is already class-differentiated via each vType's HBEFA4 emissionClass;
+        no additional per-class weight is applied (would double-count).
         """
         tl_id = self.tl_ids[intersection_id]
         ns_pcu, ew_pcu, _, _, _, _ = self._get_intersection_queues(tl_id)
 
         total_pcu = ns_pcu + ew_pcu
         phase = self.current_phases[intersection_id]
+        beta = self.beta
 
-        # Term 1: Queue penalty (primary signal)
-        queue_penalty = total_pcu / 30.0
+        # Term 1: PCU-weighted queue penalty (congestion objective)
+        queue_penalty = total_pcu / self.queue_norm
 
-        # Term 2: Pressure shaping bonus (secondary signal)
+        # Term 2: CO2 penalty (emissions objective), class-specific via HBEFA4
+        co2_penalty = self._get_intersection_co2(tl_id) / self.co2_norm
+
+        # Term 3: pressure shaping (congestion heuristic, faded out as beta->1)
         if phase == 0:        # NS_GREEN
-            pressure = (ns_pcu - ew_pcu) / 30.0
+            pressure = (ns_pcu - ew_pcu) / self.queue_norm
         elif phase == 2:      # EW_GREEN
-            pressure = (ew_pcu - ns_pcu) / 30.0
+            pressure = (ew_pcu - ns_pcu) / self.queue_norm
         else:                 # ALL_RED clearance
             pressure = 0.0
+        pressure_bonus = self.pressure_coef * max(pressure, 0.0)
 
-        pressure_bonus = 0.2 * max(pressure, 0.0)
-
-        reward = -queue_penalty + pressure_bonus
+        reward = (
+            -(1.0 - beta) * queue_penalty
+            - beta * co2_penalty
+            + (1.0 - beta) * pressure_bonus
+        )
 
         return float(reward)
 
@@ -756,6 +803,11 @@ class PuneSUMOEnv:
             "avg_queue": avg_queue_raw,  # For compatibility with train.py
             "throughput": len(self.arrived_vehicles),
             "avg_travel_time": avg_travel_time,
+            # Emissions (mg). episode_co2 is the running network total; co2_per_veh
+            # normalizes by completed trips to suppress the fixed distance-driven
+            # component and surface the controllable (idle/stop-go) slice.
+            "episode_co2": self.episode_co2,
+            "co2_per_veh": (self.episode_co2 / max(len(self.arrived_vehicles), 1)),
             "scenario": self.scenario,
             "vehicle_class_counts": vehicle_class_counts,
             "turning_counts": self.turning_counts.copy(),
