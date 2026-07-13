@@ -174,7 +174,7 @@ REWARD_CONFIG = {
     # CO2 normalization (mg/step per intersection). PLACEHOLDER — calibrate from
     # probe_co2.py so the CO2 term sits in roughly [-1, 0] before the loss-time
     # clamp to [-1, 1] (train.py). A wrong value silently flattens the CO2 signal.
-    "co2_norm":           8000.0,
+    "co2_norm":           50000.0,
     # Blend weight for the multi-objective reward:
     #   r = -(1-beta)*queue_norm - beta*co2_norm + (1-beta)*pressure_bonus
     # beta=0 -> congestion-optimal, beta=1 -> emissions-optimal.

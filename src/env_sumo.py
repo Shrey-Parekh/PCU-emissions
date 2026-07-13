@@ -110,8 +110,12 @@ class PuneSUMOEnv:
         self.queue_norm = REWARD_CONFIG.get("reward_queue_norm", 30.0)
         self.co2_norm = config.get("co2_norm", REWARD_CONFIG.get("co2_norm", 8000.0))
         self.pressure_coef = REWARD_CONFIG.get("w_pressure_bonus", 0.2)
-        # Per-episode CO2 accumulator (mg, network total), reset in reset().
+        # Per-episode emission accumulators (mg, network total), reset in reset().
         self.episode_co2 = 0.0
+        self.episode_nox = 0.0
+        self.episode_pmx = 0.0
+        self.episode_co = 0.0
+        self.episode_hc = 0.0
         
         self.sumo_config_file = SUMO_CONFIG["config_file"]
         self.step_length = SUMO_CONFIG["step_length"]
@@ -398,6 +402,10 @@ class PuneSUMOEnv:
         self.steps_since_switch = [0] * self.n_intersections
         self.turning_counts = {"straight": 0, "right_turn": 0, "left_turn": 0, "u_turn": 0}
         self.episode_co2 = 0.0
+        self.episode_nox = 0.0
+        self.episode_pmx = 0.0
+        self.episode_co = 0.0
+        self.episode_hc = 0.0
 
         # Initialize metrics tracking
         self.departed_vehicles = set()
@@ -606,9 +614,14 @@ class PuneSUMOEnv:
         
         self._update_queues()
 
-        # Accumulate network CO2 (mg) over all tracked lanes for this step
-        step_co2 = sum(self._get_intersection_co2(tl_id) for tl_id in self.tl_ids)
-        self.episode_co2 += step_co2
+        # Accumulate network emissions (mg) over all tracked lanes for this step
+        for tl_id in self.tl_ids:
+            e = self._get_intersection_emissions(tl_id)
+            self.episode_co2 += e["co2"]
+            self.episode_nox += e["nox"]
+            self.episode_pmx += e["pmx"]
+            self.episode_co += e["co"]
+            self.episode_hc += e["hc"]
 
         obs = self._get_observation()
         rewards = self._calculate_rewards()
@@ -666,6 +679,28 @@ class PuneSUMOEnv:
             except traci.exceptions.TraCIException:
                 pass
         return total_co2
+
+    def _get_intersection_emissions(self, tl_id: str) -> dict:
+        """Sum all HBEFA4 pollutants (mg/step) over an intersection's lanes.
+
+        Reported-only; NOT used in the reward (reward stays CO2-only so beta
+        keeps a clean single-objective meaning). NOx and PMx are diesel-driven,
+        so they track the bus class specifically — useful for the class-
+        conditioned divergence analysis in bus-heavy scenarios.
+        """
+        e = {"co2": 0.0, "nox": 0.0, "pmx": 0.0, "co": 0.0, "hc": 0.0}
+        if tl_id not in self.queues:
+            return e
+        for lane_id in self.queues[tl_id]:
+            try:
+                e["co2"] += self.traci_conn.lane.getCO2Emission(lane_id)
+                e["nox"] += self.traci_conn.lane.getNOxEmission(lane_id)
+                e["pmx"] += self.traci_conn.lane.getPMxEmission(lane_id)
+                e["co"] += self.traci_conn.lane.getCOEmission(lane_id)
+                e["hc"] += self.traci_conn.lane.getHCEmission(lane_id)
+            except traci.exceptions.TraCIException:
+                pass
+        return e
 
     def _compute_reward(self, intersection_id: int) -> float:
         """
@@ -808,6 +843,12 @@ class PuneSUMOEnv:
             # component and surface the controllable (idle/stop-go) slice.
             "episode_co2": self.episode_co2,
             "co2_per_veh": (self.episode_co2 / max(len(self.arrived_vehicles), 1)),
+            "episode_nox": self.episode_nox,
+            "episode_pmx": self.episode_pmx,
+            "episode_co": self.episode_co,
+            "episode_hc": self.episode_hc,
+            "nox_per_veh": (self.episode_nox / max(len(self.arrived_vehicles), 1)),
+            "pmx_per_veh": (self.episode_pmx / max(len(self.arrived_vehicles), 1)),
             "scenario": self.scenario,
             "vehicle_class_counts": vehicle_class_counts,
             "turning_counts": self.turning_counts.copy(),

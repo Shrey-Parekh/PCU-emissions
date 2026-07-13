@@ -532,7 +532,7 @@ def main() -> None:
     set_seeds(args.seed)
 
     # Always use model-prefixed filenames to allow parallel multi-model runs
-    file_prefix = "%s_%d_%s" % (args.model_type, args.seed, args.scenario)
+    file_prefix = "%s_%d_%s_b%03d" % (args.model_type, args.seed, args.scenario, int(round(args.beta * 100)))
     metrics_path = save_dir / ("%s_metrics.json" % file_prefix)
     csv_path = save_dir / ("%s_metrics.csv" % file_prefix)
     summary_path = save_dir / ("%s_summary.txt" % file_prefix)
